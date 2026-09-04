@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
+from urllib.parse import unquote
 import json
 import subprocess
 import sys
@@ -23,11 +24,30 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 # MONGODB CONNECTION
 # ==========================================
 
-client = MongoClient(MONGODB_URI)
+if not MONGODB_URI:
+    print("WARNING: MONGODB_URI is not configured.")
+    client = None
+    db = None
+    rooms_collection = None
+else:
+    try:
+        client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=10000,
+        )
 
-db = client["collaborative_editor"]
+        db = client["collaborative_editor"]
+        rooms_collection = db["rooms"]
 
-rooms_collection = db["rooms"]
+        print("MongoDB client initialized.")
+
+    except Exception as error:
+        print(f"MongoDB initialization error: {error}")
+        client = None
+        db = None
+        rooms_collection = None
 
 
 # ==========================================
@@ -43,7 +63,10 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://realtime-collaborative-code-editor-1.onrender.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,9 +89,11 @@ user_names = {}
 @app.get("/")
 def home():
 
+    database_status = "MongoDB configured" if MONGODB_URI else "MongoDB not configured"
+
     return {
         "message": "Collaborative Code Editor Python Backend is running",
-        "database": "MongoDB connected"
+        "database": database_status,
     }
 
 
@@ -78,6 +103,12 @@ def home():
 
 @app.get("/database-test")
 def database_test():
+
+    if client is None:
+        return {
+            "success": False,
+            "message": "MongoDB client is not configured."
+        }
 
     try:
 
@@ -189,7 +220,6 @@ async def run_code(data: dict):
         output = result.stdout
 
         if result.stderr:
-
             output += result.stderr
 
         return {
@@ -241,22 +271,33 @@ def save_room(
     language
 ):
 
-    rooms_collection.update_one(
+    if rooms_collection is None:
+        print("MongoDB unavailable. Room was not saved.")
+        return False
 
-        {
-            "room_id": room_id
-        },
+    try:
 
-        {
-            "$set": {
-                "room_id": room_id,
-                "code": code,
-                "language": language
-            }
-        },
+        rooms_collection.update_one(
+            {
+                "room_id": room_id
+            },
+            {
+                "$set": {
+                    "room_id": room_id,
+                    "code": code,
+                    "language": language
+                }
+            },
+            upsert=True
+        )
 
-        upsert=True
-    )
+        return True
+
+    except Exception as error:
+
+        print(f"MongoDB save error: {error}")
+
+        return False
 
 
 # ==========================================
@@ -265,11 +306,22 @@ def save_room(
 
 def get_room(room_id):
 
-    return rooms_collection.find_one(
-        {
-            "room_id": room_id
-        }
-    )
+    if rooms_collection is None:
+        return None
+
+    try:
+
+        return rooms_collection.find_one(
+            {
+                "room_id": room_id
+            }
+        )
+
+    except Exception as error:
+
+        print(f"MongoDB read error: {error}")
+
+        return None
 
 
 # ==========================================
@@ -283,13 +335,13 @@ async def safe_send(
 
     try:
 
-        await websocket.send_text(
-            message
-        )
+        await websocket.send_text(message)
 
         return True
 
-    except Exception:
+    except Exception as error:
+
+        print(f"Send error: {error}")
 
         return False
 
@@ -301,7 +353,6 @@ async def safe_send(
 async def broadcast_users(room_id):
 
     if room_id not in rooms:
-
         return
 
     users = []
@@ -315,11 +366,8 @@ async def broadcast_users(room_id):
             )
 
     message = json.dumps({
-
         "type": "users",
-
         "users": users
-
     })
 
     disconnected = []
@@ -361,17 +409,12 @@ async def broadcast_chat(
 ):
 
     if room_id not in rooms:
-
         return
 
     chat_data = json.dumps({
-
         "type": "chat",
-
         "username": username,
-
         "message": message
-
     })
 
     disconnected = []
@@ -414,17 +457,12 @@ async def broadcast_code(
 ):
 
     if room_id not in rooms:
-
         return
 
     code_data = json.dumps({
-
         "type": "code",
-
         "code": code,
-
         "language": language
-
     })
 
     disconnected = []
@@ -432,7 +470,6 @@ async def broadcast_code(
     for websocket in rooms[room_id]:
 
         if websocket == sender:
-
             continue
 
         success = await safe_send(
@@ -470,15 +507,11 @@ async def broadcast_language(
 ):
 
     if room_id not in rooms:
-
         return
 
     language_data = json.dumps({
-
         "type": "language",
-
         "language": language
-
     })
 
     disconnected = []
@@ -486,7 +519,6 @@ async def broadcast_language(
     for websocket in rooms[room_id]:
 
         if websocket == sender:
-
             continue
 
         success = await safe_send(
@@ -529,37 +561,86 @@ async def websocket_endpoint(
         f"WebSocket connected to room: {room_id}"
     )
 
-    # --------------------------------------
-    # Create room
-    # --------------------------------------
+    # ======================================
+    # GET USERNAME FROM QUERY PARAMETER
+    # ======================================
+
+    username = websocket.query_params.get(
+        "username",
+        "Anonymous"
+    )
+
+    username = unquote(username).strip()
+
+    if not username:
+        username = "Anonymous"
+
+    # ======================================
+    # CREATE ROOM
+    # ======================================
 
     if room_id not in rooms:
 
         rooms[room_id] = []
 
-    # --------------------------------------
-    # Add connection
-    # --------------------------------------
+    # ======================================
+    # ADD CONNECTION
+    # ======================================
 
-    rooms[room_id].append(
-        websocket
+    rooms[room_id].append(websocket)
+
+    user_names[websocket] = username
+
+    print(
+        f"{username} joined room {room_id}"
     )
 
+    # ======================================
+    # SEND SAVED ROOM
+    # ======================================
+
     try:
+
+        saved_room = get_room(room_id)
+
+        if saved_room:
+
+            await safe_send(
+                websocket,
+                json.dumps({
+                    "type": "code",
+                    "code": saved_room.get(
+                        "code",
+                        ""
+                    ),
+                    "language": saved_room.get(
+                        "language",
+                        "python"
+                    )
+                })
+            )
+
+        # ==================================
+        # SEND ONLINE USERS
+        # ==================================
+
+        await broadcast_users(room_id)
+
+        # ==================================
+        # WAIT FOR MESSAGES
+        # ==================================
 
         while True:
 
             message = await websocket.receive_text()
 
-            # ----------------------------------
-            # Parse JSON
-            # ----------------------------------
+            print(
+                f"Message from {username}: {message}"
+            )
 
             try:
 
-                data = json.loads(
-                    message
-                )
+                data = json.loads(message)
 
             except json.JSONDecodeError:
 
@@ -569,78 +650,48 @@ async def websocket_endpoint(
 
                 continue
 
-            message_type = data.get(
-                "type"
-            )
+            message_type = data.get("type")
 
             # ==================================
-            # JOIN ROOM
+            # JOIN
             # ==================================
 
             if message_type == "join":
 
-                username = data.get(
+                # Support old frontend too.
+                new_username = data.get(
                     "username",
-                    "Anonymous"
+                    username
                 )
 
-                username = username.strip()
+                new_username = (
+                    new_username.strip()
+                    if isinstance(
+                        new_username,
+                        str
+                    )
+                    else username
+                )
 
-                if not username:
+                if new_username:
 
-                    username = "Anonymous"
-
-                user_names[websocket] = username
+                    user_names[websocket] = new_username
+                    username = new_username
 
                 print(
-                    f"{username} joined room {room_id}"
+                    f"{username} confirmed in room {room_id}"
                 )
 
-                # ----------------------------------
-                # Load saved room
-                # ----------------------------------
-
-                saved_room = get_room(
-                    room_id
-                )
-
-                if saved_room:
-
-                    await safe_send(
-
-                        websocket,
-
-                        json.dumps({
-
-                            "type": "code",
-
-                            "code": saved_room.get(
-                                "code",
-                                ""
-                            ),
-
-                            "language": saved_room.get(
-                                "language",
-                                "python"
-                            )
-
-                        })
-
-                    )
-
-                # ----------------------------------
-                # Update users
-                # ----------------------------------
-
-                await broadcast_users(
-                    room_id
-                )
+                await broadcast_users(room_id)
 
             # ==================================
             # CODE CHANGE
             # ==================================
 
-            elif message_type == "code":
+            elif message_type in [
+                "code",
+                "code_update"
+            ]:
 
                 code = data.get(
                     "code",
@@ -653,7 +704,6 @@ async def websocket_endpoint(
                 )
 
                 # Save to MongoDB
-
                 save_room(
                     room_id,
                     code,
@@ -661,31 +711,26 @@ async def websocket_endpoint(
                 )
 
                 # Send to other users
-
                 await broadcast_code(
-
                     room_id,
-
                     websocket,
-
                     code,
-
                     language
-
                 )
 
             # ==================================
             # LANGUAGE CHANGE
             # ==================================
 
-            elif message_type == "language":
+            elif message_type in [
+                "language",
+                "language_update"
+            ]:
 
                 language = data.get(
                     "language",
                     "python"
                 )
-
-                # Get existing room
 
                 saved_room = get_room(
                     room_id
@@ -700,45 +745,34 @@ async def websocket_endpoint(
                         ""
                     )
 
-                # Save language
-
                 save_room(
-
                     room_id,
-
                     existing_code,
-
                     language
-
                 )
 
-                # Tell other users
-
                 await broadcast_language(
-
                     room_id,
-
                     websocket,
-
                     language
-
                 )
 
             # ==================================
-            # CHAT MESSAGE
+            # CHAT
             # ==================================
 
             elif message_type == "chat":
-
-                username = user_names.get(
-                    websocket,
-                    "Anonymous"
-                )
 
                 chat_message = data.get(
                     "message",
                     ""
                 )
+
+                if not isinstance(
+                    chat_message,
+                    str
+                ):
+                    continue
 
                 chat_message = (
                     chat_message.strip()
@@ -752,13 +786,9 @@ async def websocket_endpoint(
                     )
 
                     await broadcast_chat(
-
                         room_id,
-
                         username,
-
                         chat_message
-
                     )
 
     # ==========================================
@@ -767,11 +797,6 @@ async def websocket_endpoint(
 
     except WebSocketDisconnect:
 
-        username = user_names.get(
-            websocket,
-            "User"
-        )
-
         print(
             f"{username} disconnected"
         )
@@ -779,14 +804,15 @@ async def websocket_endpoint(
     except Exception as error:
 
         print(
-            f"WebSocket error: {error}"
+            f"WebSocket error for "
+            f"{username}: {error}"
         )
 
     finally:
 
-        # --------------------------------------
-        # Remove WebSocket
-        # --------------------------------------
+        # ======================================
+        # REMOVE WEBSOCKET
+        # ======================================
 
         if room_id in rooms:
 
@@ -796,9 +822,9 @@ async def websocket_endpoint(
                     websocket
                 )
 
-        # --------------------------------------
-        # Remove username
-        # --------------------------------------
+        # ======================================
+        # REMOVE USERNAME
+        # ======================================
 
         if websocket in user_names:
 
@@ -806,9 +832,9 @@ async def websocket_endpoint(
                 websocket
             ]
 
-        # --------------------------------------
-        # Update remaining users
-        # --------------------------------------
+        # ======================================
+        # UPDATE USERS
+        # ======================================
 
         if (
             room_id in rooms
@@ -819,9 +845,9 @@ async def websocket_endpoint(
                 room_id
             )
 
-        # --------------------------------------
-        # Delete empty room from memory
-        # --------------------------------------
+        # ======================================
+        # DELETE EMPTY ROOM
+        # ======================================
 
         if room_id in rooms:
 

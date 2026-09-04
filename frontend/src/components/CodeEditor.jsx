@@ -35,7 +35,7 @@ hello()`
     if (!roomId || !username) return;
 
     const socket = new WebSocket(
-      `${WS_URL}/ws/${encodeURIComponent(roomId)}`
+      `${WS_URL}/ws/${encodeURIComponent(roomId)}?username=${encodeURIComponent(username)}`
     );
 
     socketRef.current = socket;
