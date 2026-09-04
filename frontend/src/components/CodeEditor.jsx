@@ -586,7 +586,7 @@ hello()`
           <div className="monaco-container">
 
             <Editor
-              height="100%"
+              height="500px"
               language={language}
               value={code}
               onChange={handleEditorChange}
