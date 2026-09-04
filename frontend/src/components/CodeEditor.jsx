@@ -24,13 +24,13 @@ hello()`
   const [running, setRunning] = useState(false);
 
   const socketRef = useRef(null);
-  const editorRef = useRef(null);
   const chatEndRef = useRef(null);
   const isRemoteUpdate = useRef(false);
 
-  // -----------------------------
-  // WebSocket Connection
-  // -----------------------------
+  // ==========================================
+  // WEBSOCKET CONNECTION
+  // ==========================================
+
   useEffect(() => {
     if (!roomId || !username) return;
 
@@ -42,22 +42,31 @@ hello()`
 
     socket.onopen = () => {
       console.log("Connected to collaboration server");
+
       setConnected(true);
 
-      socket.send(
-        JSON.stringify({
-          type: "join",
-          username,
-        })
-      );
+      // Send JOIN message to Python backend
+      const joinMessage = {
+        type: "join",
+        username: username,
+      };
+
+      console.log("Sending join message:", joinMessage);
+
+      socket.send(JSON.stringify(joinMessage));
     };
 
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        // Initial room state
-        if (data.type === "room_state") {
+        console.log("Received from server:", data);
+
+        // ======================================
+        // CODE FROM SERVER
+        // ======================================
+
+        if (data.type === "code") {
           if (typeof data.code === "string") {
             isRemoteUpdate.current = true;
             setCode(data.code);
@@ -67,47 +76,50 @@ hello()`
             setLanguage(data.language);
           }
 
-          if (Array.isArray(data.users)) {
-            setUsers(data.users);
-          }
-
-          if (Array.isArray(data.messages)) {
-            setMessages(data.messages);
-          }
+          return;
         }
 
-        // Code update
-        if (data.type === "code_update") {
-          if (typeof data.code === "string") {
-            isRemoteUpdate.current = true;
-            setCode(data.code);
-          }
-        }
+        // ======================================
+        // LANGUAGE FROM SERVER
+        // ======================================
 
-        // Language update
-        if (data.type === "language_update") {
+        if (data.type === "language") {
           if (data.language) {
             setLanguage(data.language);
           }
+
+          return;
         }
 
-        // User list update
-        if (data.type === "users_update") {
+        // ======================================
+        // ONLINE USERS FROM SERVER
+        // ======================================
+
+        if (data.type === "users") {
           if (Array.isArray(data.users)) {
+            console.log("Online users:", data.users);
             setUsers(data.users);
           }
+
+          return;
         }
 
-        // Chat message
+        // ======================================
+        // CHAT MESSAGE
+        // ======================================
+
         if (data.type === "chat") {
           setMessages((previous) => [
             ...previous,
             {
-              username: data.username,
-              message: data.message,
-              timestamp: data.timestamp || new Date().toISOString(),
+              username: data.username || "User",
+              message: data.message || "",
+              timestamp:
+                data.timestamp || new Date().toISOString(),
             },
           ]);
+
+          return;
         }
       } catch (error) {
         console.error("WebSocket message error:", error);
@@ -119,29 +131,43 @@ hello()`
       setConnected(false);
     };
 
-    socket.onclose = () => {
-      console.log("Disconnected from collaboration server");
+    socket.onclose = (event) => {
+      console.log(
+        "Disconnected from collaboration server",
+        "Code:",
+        event.code,
+        "Reason:",
+        event.reason
+      );
+
       setConnected(false);
     };
 
     return () => {
-      socket.close();
+      console.log("Closing WebSocket");
+
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+
       socketRef.current = null;
     };
   }, [roomId, username]);
 
-  // -----------------------------
-  // Auto-scroll chat
-  // -----------------------------
+  // ==========================================
+  // AUTO SCROLL CHAT
+  // ==========================================
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [messages]);
 
-  // -----------------------------
-  // Editor change
-  // -----------------------------
+  // ==========================================
+  // EDITOR CHANGE
+  // ==========================================
+
   const handleEditorChange = (value) => {
     const newCode = value || "";
 
@@ -158,17 +184,20 @@ hello()`
     ) {
       socketRef.current.send(
         JSON.stringify({
-          type: "code_update",
+          // IMPORTANT:
+          // Python backend expects "code"
+          type: "code",
           code: newCode,
-          username,
+          language: language,
         })
       );
     }
   };
 
-  // -----------------------------
-  // Language change
-  // -----------------------------
+  // ==========================================
+  // LANGUAGE CHANGE
+  // ==========================================
+
   const handleLanguageChange = (event) => {
     const newLanguage = event.target.value;
 
@@ -180,17 +209,19 @@ hello()`
     ) {
       socketRef.current.send(
         JSON.stringify({
-          type: "language_update",
+          // IMPORTANT:
+          // Python backend expects "language"
+          type: "language",
           language: newLanguage,
-          username,
         })
       );
     }
   };
 
-  // -----------------------------
-  // Send chat message
-  // -----------------------------
+  // ==========================================
+  // SEND CHAT
+  // ==========================================
+
   const sendChatMessage = () => {
     const message = chatMessage.trim();
 
@@ -203,8 +234,8 @@ hello()`
       socketRef.current.send(
         JSON.stringify({
           type: "chat",
-          username,
-          message,
+          username: username,
+          message: message,
         })
       );
 
@@ -219,9 +250,10 @@ hello()`
     }
   };
 
-  // -----------------------------
-  // Run Code
-  // -----------------------------
+  // ==========================================
+  // RUN CODE
+  // ==========================================
+
   const runCode = async () => {
     if (!code.trim()) {
       setOutput("Please enter some code first.");
@@ -255,7 +287,9 @@ hello()`
       }
 
       if (data.output !== undefined) {
-        setOutput(data.output || "Program finished with no output.");
+        setOutput(
+          data.output || "Program finished with no output."
+        );
       } else if (data.error) {
         setOutput(data.error);
       } else {
@@ -265,16 +299,17 @@ hello()`
       console.error("Run code error:", error);
 
       setOutput(
-        "Unable to connect to the backend. Please make sure the backend is running."
+        "Unable to connect to the backend. Please try again."
       );
     } finally {
       setRunning(false);
     }
   };
 
-  // -----------------------------
-  // Copy Room ID
-  // -----------------------------
+  // ==========================================
+  // COPY ROOM ID
+  // ==========================================
+
   const copyRoomId = async () => {
     try {
       await navigator.clipboard.writeText(roomId);
@@ -284,17 +319,25 @@ hello()`
     }
   };
 
-  // -----------------------------
-  // Monaco Editor
-  // -----------------------------
+  // ==========================================
+  // MONACO
+  // ==========================================
+
   const handleEditorMount = (editor) => {
-    editorRef.current = editor;
+    // Keep Monaco focused when loaded
+    editor.focus();
   };
+
+  // ==========================================
+  // UI
+  // ==========================================
 
   return (
     <div className="editor-page">
-      {/* Top Bar */}
+
+      {/* TOP BAR */}
       <header className="editor-topbar">
+
         <div className="brand-section">
           <div className="brand-logo">CC</div>
 
@@ -305,6 +348,7 @@ hello()`
         </div>
 
         <div className="room-section">
+
           <div className="room-info">
             <span className="room-label">ROOM</span>
 
@@ -320,6 +364,7 @@ hello()`
           </div>
 
           <div className="connection-status">
+
             <span
               className={`status-dot ${
                 connected ? "online" : "offline"
@@ -330,6 +375,7 @@ hello()`
           </div>
 
           <div className="user-profile">
+
             <div className="user-avatar">
               {username.charAt(0).toUpperCase()}
             </div>
@@ -337,71 +383,108 @@ hello()`
             <span>{username}</span>
           </div>
 
-          <button className="leave-btn" onClick={onLeaveRoom}>
+          <button
+            className="leave-btn"
+            onClick={onLeaveRoom}
+          >
             Leave
           </button>
+
         </div>
       </header>
 
-      {/* Main Workspace */}
+      {/* WORKSPACE */}
       <div className="workspace">
-        {/* Left Sidebar */}
+
+        {/* SIDEBAR */}
         <aside className="sidebar">
-          {/* Online Users */}
+
+          {/* ONLINE USERS */}
           <div className="sidebar-section">
+
             <div className="section-title">
               <span>ONLINE USERS</span>
-              <span className="user-count">{users.length}</span>
+
+              <span className="user-count">
+                {users.length}
+              </span>
             </div>
 
             <div className="users-list">
+
               {users.length === 0 ? (
+
                 <div className="empty-users">
                   Waiting for collaborators...
                 </div>
+
               ) : (
+
                 users.map((user, index) => {
+
                   const userName =
                     typeof user === "string"
                       ? user
-                      : user.username || user.name || "User";
+                      : user.username ||
+                        user.name ||
+                        "User";
 
                   return (
-                    <div className="online-user" key={`${userName}-${index}`}>
+                    <div
+                      className="online-user"
+                      key={`${userName}-${index}`}
+                    >
+
                       <div className="small-avatar">
-                        {userName.charAt(0).toUpperCase()}
+                        {userName
+                          .charAt(0)
+                          .toUpperCase()}
                       </div>
 
                       <span>{userName}</span>
 
                       {userName === username && (
-                        <span className="you-label">You</span>
+                        <span className="you-label">
+                          You
+                        </span>
                       )}
 
                       <span className="online-dot"></span>
+
                     </div>
                   );
                 })
               )}
+
             </div>
           </div>
 
-          {/* Chat */}
+          {/* TEAM CHAT */}
           <div className="sidebar-section chat-section">
+
             <div className="section-title">
               <span>TEAM CHAT</span>
             </div>
 
             <div className="chat-messages">
+
               {messages.length === 0 ? (
+
                 <div className="empty-chat">
                   No messages yet.
                   <br />
                   Start the conversation!
                 </div>
+
               ) : (
+
                 messages.map((msg, index) => (
-                  <div className="chat-message" key={index}>
+
+                  <div
+                    className="chat-message"
+                    key={index}
+                  >
+
                     <div className="chat-avatar">
                       {(msg.username || "U")
                         .charAt(0)
@@ -409,20 +492,27 @@ hello()`
                     </div>
 
                     <div className="chat-content">
+
                       <div className="chat-header">
-                        <strong>{msg.username}</strong>
+                        <strong>
+                          {msg.username}
+                        </strong>
                       </div>
 
                       <p>{msg.message}</p>
+
                     </div>
+
                   </div>
                 ))
               )}
 
               <div ref={chatEndRef}></div>
+
             </div>
 
             <div className="chat-input-container">
+
               <input
                 type="text"
                 placeholder="Message team..."
@@ -433,28 +523,49 @@ hello()`
                 onKeyDown={handleChatKeyDown}
               />
 
-              <button onClick={sendChatMessage}>➤</button>
+              <button onClick={sendChatMessage}>
+                ➤
+              </button>
+
             </div>
+
           </div>
+
         </aside>
 
-        {/* Editor Area */}
+        {/* EDITOR */}
         <main className="editor-main">
-          {/* Editor Toolbar */}
+
+          {/* TOOLBAR */}
           <div className="editor-toolbar">
+
             <div className="file-info">
-              <span className="file-icon">◉</span>
-              <span>main.{language === "python" ? "py" : "js"}</span>
+              <span className="file-icon">
+                ◉
+              </span>
+
+              <span>
+                main.
+                {language === "python"
+                  ? "py"
+                  : "js"}
+              </span>
             </div>
 
             <div className="editor-actions">
+
               <select
                 value={language}
                 onChange={handleLanguageChange}
                 className="language-select"
               >
-                <option value="python">Python</option>
-                <option value="javascript">JavaScript</option>
+                <option value="python">
+                  Python
+                </option>
+
+                <option value="javascript">
+                  JavaScript
+                </option>
               </select>
 
               <button
@@ -462,13 +573,18 @@ hello()`
                 onClick={runCode}
                 disabled={running}
               >
-                {running ? "Running..." : "▶ Run Code"}
+                {running
+                  ? "Running..."
+                  : "▶ Run Code"}
               </button>
+
             </div>
+
           </div>
 
-          {/* Monaco */}
+          {/* MONACO */}
           <div className="monaco-container">
+
             <Editor
               height="100%"
               language={language}
@@ -478,27 +594,41 @@ hello()`
               theme="vs-dark"
               options={{
                 fontSize: 15,
+
                 minimap: {
                   enabled: true,
                 },
+
                 automaticLayout: true,
+
                 wordWrap: "on",
+
                 tabSize: 4,
+
                 insertSpaces: true,
+
                 smoothScrolling: true,
+
                 cursorBlinking: "smooth",
+
                 padding: {
                   top: 15,
                 },
               }}
             />
+
           </div>
 
-          {/* Output */}
+          {/* OUTPUT */}
           <div className="output-panel">
+
             <div className="output-header">
+
               <div>
-                <span className="output-icon">▣</span>
+                <span className="output-icon">
+                  ▣
+                </span>
+
                 <span>OUTPUT</span>
               </div>
 
@@ -508,20 +638,31 @@ hello()`
               >
                 Clear
               </button>
+
             </div>
 
             <div className="output-content">
+
               {output ? (
+
                 <pre>{output}</pre>
+
               ) : (
+
                 <div className="empty-output">
                   Run your code to see the output here.
                 </div>
+
               )}
+
             </div>
+
           </div>
+
         </main>
+
       </div>
+
     </div>
   );
 }
